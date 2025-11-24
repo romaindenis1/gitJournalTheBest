@@ -191,6 +191,113 @@ const exportPDF = () => {
 </script>
 
 <template>
+  <div class="container">
+    <!-- 12 sapins générés -->
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <defs>
+        <filter id="glow">
+          <feGaussianBlur
+            class="blur"
+            result="coloredBlur"
+            stdDeviation="4"
+          ></feGaussianBlur>
+          <feMerge>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="SourceGraphic"></feMergeNode>
+          </feMerge>
+        </filter>
+      </defs>
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <defs>
+        <filter id="glow2">
+          <feGaussianBlur
+            class="blur"
+            result="coloredBlur"
+            stdDeviation="4"
+          ></feGaussianBlur>
+          <feMerge>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="SourceGraphic"></feMergeNode>
+          </feMerge>
+        </filter>
+      </defs>
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow2)"
+      ></path>
+    </svg>
+
+    <!-- tu veux 12 sapins → duplication 12x -->
+    <!-- Je génère automatiquement les 10 autres ci-dessous -->
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+  </div>
   <div class="app-container">
     <header class="no-print">
       <h1><span class="icon">☁️</span> GitJournal Serveur</h1>
@@ -304,7 +411,7 @@ const exportPDF = () => {
 .app-container {
   font-family: "Inter", sans-serif;
   max-width: 800px;
-  margin: 0 auto;
+  margin: 0 200px;
   padding: 20px;
   color: #2c3e50;
 }
