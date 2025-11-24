@@ -34,7 +34,7 @@ Aucun fichier `.env` ou `.config.js` compliqué à gérer.
 Ce projet nécessite deux terminaux (un pour le Frontend, un pour le Backend).
 
 ### Pré-requis
-- Node.js (v16+)
+- Node.js (v22+)
 - Git
 
 ### 1. Lancer le Backend (Serveur de sauvegarde)
