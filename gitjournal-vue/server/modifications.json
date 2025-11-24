@@ -1,0 +1,10 @@
+{
+  "52546ec50bd1c34a94129b1a5b38ec0ca2b9c8da": {
+    "message": "Feat: implementation de la fonction AskOnline()",
+    "duration": 5
+  },
+  "d1e5392ec83c61a3efd7fb3194476f5a0721a45a": {
+    "message": "Feat: Ajout d'un listecacacaner et un distributeur de tache en fonction des actions reçu dans le broker MQTT pour traiter les infos dans les bonnes fonctions",
+    "duration": 30
+  }
+}
