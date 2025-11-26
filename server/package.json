@@ -15,7 +15,12 @@
     "express": "^5.1.0"
   },
   "devDependencies": {
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^39.2.3",
+    "electron-builder": "^26.0.12",
     "jest": "^30.2.0",
-    "supertest": "^7.1.4"
+    "supertest": "^7.1.4",
+    "wait-on": "^9.0.3"
   }
 }

@@ -3,43 +3,50 @@ const fs = require("fs");
 const cors = require("cors");
 const path = require("path");
 
-const app = express();
-const PORT = 3000;
-const DATA_FILE = path.join(__dirname, "modifications.json");
+function startServer(userDataPath) {
+  const app = express();
+  const PORT = 3000;
+  
+  // IMPORTANT : On stocke le fichier là où on a la permission (AppData)
+  // Si userDataPath n'est pas fourni (mode dev classique), on utilise __dirname
+  const DATA_DIR = userDataPath || __dirname;
+  const DATA_FILE = path.join(DATA_DIR, "modifications.json");
 
-// Middleware
-app.use(cors()); // Autorise Vue.js (port 5173) à parler à ce serveur (port 3000)
-app.use(express.json());
+  console.log("📁 Stockage des données dans :", DATA_FILE);
 
-// Route 1 : Récupérer les modifications sauvegardées
-app.get("/edits", (req, res) => {
-  if (fs.existsSync(DATA_FILE)) {
-    const data = fs.readFileSync(DATA_FILE, "utf8");
-    res.json(JSON.parse(data || "{}"));
-  } else {
-    res.json({});
-  }
-});
+  app.use(cors());
+  app.use(express.json());
 
-// Route 2 : Sauvegarder une modification
-app.post("/edits", (req, res) => {
-  const newEdits = req.body; // VueJS nous envoie l'objet complet des edits
-
-  // On écrit directement dans le fichier (écrase l'ancien contenu)
-  fs.writeFile(DATA_FILE, JSON.stringify(newEdits, null, 2), (err) => {
-    if (err) {
-      console.error(err);
-      return res.status(500).json({ error: "Erreur écriture fichier" });
+  app.get("/edits", (req, res) => {
+    if (fs.existsSync(DATA_FILE)) {
+      const data = fs.readFileSync(DATA_FILE, "utf8");
+      res.json(JSON.parse(data || "{}"));
+    } else {
+      res.json({});
     }
-    res.json({ status: "success" });
   });
-});
 
-// Modification pour permettre les tests sans lancer le serveur
-if (require.main === module) {
-  app.listen(PORT, () => {
+  app.post("/edits", (req, res) => {
+    const newEdits = req.body;
+    fs.writeFile(DATA_FILE, JSON.stringify(newEdits, null, 2), (err) => {
+      if (err) {
+        console.error(err);
+        return res.status(500).json({ error: "Erreur écriture fichier" });
+      }
+      res.json({ status: "success" });
+    });
+  });
+
+  const server = app.listen(PORT, () => {
     console.log(`📡 Serveur backend actif sur http://localhost:${PORT}`);
   });
+  
+  return server;
 }
 
-module.exports = app; // Export indispensable pour les tests
+// Si lancé directement via "node server.js"
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = startServer;

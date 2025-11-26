@@ -1,0 +1,40 @@
+name: Build Windows Exe
+
+on:
+  # Permet de lancer la construction manuellement depuis l'onglet "Actions"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # 1. Récupérer le code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # 2. Installer Node.js
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      # 3. Installer les dépendances
+      - name: Install Dependencies
+        run: npm install
+
+      # 4. Construire le projet (Vite + Electron)
+      # Cette commande lance "npm run electron:build" défini dans votre package.json
+      # On désactive la signature pour éviter les erreurs de certificats
+      - name: Build Electron App
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: false
+        run: npm run electron:build
+
+      # 5. Récupérer le fichier .exe généré
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GitJournal-Setup
+          path: dist_electron/*.exe
