@@ -24,7 +24,7 @@ Générez un rapport propre (A4) prêt à être envoyé à un client ou un manag
 
 ### 4. ⚙️ Zéro Config Fichier
 Aucun fichier `.env` ou `.config.js` compliqué à gérer.
-- Les identifiants (Token, Repo, User) sont stockés localement dans votre navigateur (`LocalStorage`).
+- Les identifiants (Token, Repo, User) sont stockés localement grâce au backend qui enregistre chaque modification.
 - L'interface se souvient de votre dernier projet ouvert.
 
 ---
@@ -34,7 +34,7 @@ Aucun fichier `.env` ou `.config.js` compliqué à gérer.
 Ce projet nécessite deux terminaux (un pour le Frontend, un pour le Backend).
 
 ### Pré-requis
-- Node.js (v16+)
+- Node.js (v22+)
 - Git
 
 ### 1. Lancer le Backend (Serveur de sauvegarde)
@@ -44,3 +44,11 @@ Ce petit serveur gère le fichier `modifications.json`.
 cd server
 npm install
 node server.js
+```
+
+### 2. Lancer le frontend 
+```bash
+cd gitjournal-vue
+npm i
+npm run dev
+```

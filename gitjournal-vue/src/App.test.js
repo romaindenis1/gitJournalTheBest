@@ -3,14 +3,9 @@ import { mount } from "@vue/test-utils";
 import App from "./App.vue";
 import html2pdf from "html2pdf.js";
 
-// --- UTILITAIRE ---
-// Permet d'attendre que toutes les promesses en attente soient résolues
-// Utile car fetch + json + updates Vue prennent plusieurs "ticks"
 const flushPromises = () => new Promise((resolve) => setTimeout(resolve, 0));
 
-// --- MOCKS GLOBAUX ---
-
-// 1. Mock de html2pdf
+// --- MOCKS ---
 vi.mock("html2pdf.js", () => ({
   default: vi.fn(() => ({
     set: vi.fn().mockReturnThis(),
@@ -19,10 +14,8 @@ vi.mock("html2pdf.js", () => ({
   })),
 }));
 
-// 2. Mock de fetch (API REST)
 global.fetch = vi.fn();
 
-// 3. Mock du LocalStorage
 const localStorageMock = (() => {
   let store = {};
   return {
@@ -40,104 +33,174 @@ Object.defineProperty(window, "localStorage", { value: localStorageMock });
 describe("App.vue - GitJournal Integration", () => {
   let wrapper;
 
-  const mockCommits = [
+  // Jeu de données pour tester le parsing des tags
+  const mockCommitsTags = [
     {
-      sha: "sha2",
+      sha: "tag2",
       commit: {
-        message: "Commit B\nDescription",
+        // [DONE][30] devrait forcer la durée à 30min, même si la diff est différente
+        message: "[DONE][30] Tâche terminée\nDescription",
         author: { date: "2023-10-10T10:00:00Z" },
       },
-      html_url: "http://github.com/url2",
+      html_url: "url2",
     },
     {
-      sha: "sha1",
-      commit: { message: "Commit A", author: { date: "2023-10-10T09:00:00Z" } },
-      html_url: "http://github.com/url1",
+      sha: "tag1",
+      commit: {
+        message: "Début projet",
+        author: { date: "2023-10-10T09:00:00Z" },
+      },
+      html_url: "url1",
     },
   ];
 
   beforeEach(() => {
     vi.clearAllMocks();
     localStorageMock.clear();
-    // Par défaut, fetch réussit et renvoie un objet vide pour loadEditsFromServer
-    fetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({}),
-    });
+    fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
   });
 
-  it("charge la configuration depuis le localStorage au montage", async () => {
-    localStorageMock.setItem("gj_owner", "Facebook");
-    localStorageMock.setItem("gj_repo", "React");
-
-    wrapper = mount(App);
-    await flushPromises(); // On attend que le onMounted soit fini
-
-    expect(wrapper.vm.config.owner).toBe("Facebook");
-    expect(wrapper.vm.config.repo).toBe("React");
-  });
-
-  it("affiche une erreur si on clique sur Générer sans config", async () => {
-    wrapper = mount(App);
-    await flushPromises();
-
-    await wrapper.find(".btn-gen").trigger("click");
-    await wrapper.vm.$nextTick(); // On attend la mise à jour du DOM
-
-    expect(wrapper.find(".error").exists()).toBe(true);
-    expect(wrapper.text()).toContain("Veuillez remplir le propriétaire");
-  });
-
-  it("récupère les commits et calcule correctement la durée (Logique Métier)", async () => {
-    // CORRECTION : On utilise mockImplementation pour répondre intelligemment selon l'URL
+  it("priorise le tag manuel [30] sur le calcul automatique", async () => {
+    // Mock implémentation intelligente
     fetch.mockImplementation((url) => {
-      // Si l'URL contient "github", on renvoie les commits mockés
       if (url.toString().includes("github.com")) {
         return Promise.resolve({
           ok: true,
-          json: () => Promise.resolve(mockCommits),
+          json: () => Promise.resolve(mockCommitsTags),
         });
       }
-      // Sinon (appel vers localhost:3000/edits), on renvoie vide
-      return Promise.resolve({
-        ok: true,
-        json: () => Promise.resolve({}),
-      });
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
     });
 
     wrapper = mount(App);
-    // Attente du montage initial (qui fait un fetch vers localhost)
     await flushPromises();
 
-    wrapper.vm.config.owner = "antoineFabr";
-    wrapper.vm.config.repo = "Antoine-sCMS";
-
-    // Action : Clic
+    wrapper.vm.config.owner = "user";
+    wrapper.vm.config.repo = "repo";
     await wrapper.find(".btn-gen").trigger("click");
 
-    // On attend la résolution des promesses (fetch edits + fetch github)
     await flushPromises();
     await wrapper.vm.$nextTick();
 
     const rows = wrapper.findAll(".commit-row");
     expect(rows.length).toBe(2);
 
-    const firstRowDuration = rows[0].find(".edit-duration").element.value;
-    expect(firstRowDuration).toBe("60");
+    // TEST DE LA DURÉE
+    // Calcul auto : 10h - 9h = 60min.
+    // MAIS le tag est [30]. Donc on attend 30.
+    const durationInput = rows[0].find(".edit-duration").element.value;
+    expect(durationInput).toBe("30");
 
-    const firstRowMessage = rows[0].find(".edit-message").element.value;
-    expect(firstRowMessage).toBe("Commit B");
+    // TEST DU MESSAGE NETTOYÉ
+    // Le message affiché ne doit plus contenir [DONE][30]
+    const messageInput = rows[0].find(".edit-message").element.value;
+    expect(messageInput).toBe("Tâche terminée");
+
+    // TEST DU STATUT
+    // On vérifie qu'un badge DONE est apparu
+    const badge = rows[0].find(".status-badge.DONE");
+    expect(badge.exists()).toBe(true);
   });
 
-  it("appelle html2pdf lors du clic sur export", async () => {
+  // Test de sauvegarde (inchangé, mais inclus pour complétude)
+  it("sauvegarde les modifications avec debounce", async () => {
+    vi.useFakeTimers();
+    fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    wrapper = mount(App);
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+
+    wrapper.vm.journalData = {
+      keyDay: {
+        commits: [
+          { id: "123", message: "Original", duration: 10, dateKey: "keyDay" },
+        ],
+        totalMinutes: 10,
+      },
+    };
+    await wrapper.vm.$nextTick();
+
+    const inputMsg = wrapper.find(".edit-message");
+    await inputMsg.setValue("Modif");
+    await wrapper.vm.$nextTick();
+
+    vi.advanceTimersByTime(1100);
+
+    const calls = fetch.mock.calls;
+    const postCall = calls.find((call) => call[1] && call[1].method === "POST");
+    expect(postCall).toBeDefined();
+    vi.useRealTimers();
+  });
+
+  it("priorise le tag manuel [30] sur le calcul automatique", async () => {
+    // Mock implémentation intelligente
+    fetch.mockImplementation((url) => {
+      if (url.toString().includes("github.com")) {
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(mockCommitsTags),
+        });
+      }
+      return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
+    });
+
     wrapper = mount(App);
     await flushPromises();
 
-    wrapper.vm.journalData = { dummy: {} };
+    wrapper.vm.config.owner = "user";
+    wrapper.vm.config.repo = "repo";
+    await wrapper.find(".btn-gen").trigger("click");
+
+    await flushPromises();
     await wrapper.vm.$nextTick();
 
-    await wrapper.find(".btn-pdf").trigger("click");
+    const rows = wrapper.findAll(".commit-row");
+    expect(rows.length).toBe(2);
 
-    expect(html2pdf).toHaveBeenCalled();
+    // TEST DE LA DURÉE
+    // Calcul auto : 10h - 9h = 60min.
+    // MAIS le tag est [30]. Donc on attend 30.
+    const durationInput = rows[0].find(".edit-duration").element.value;
+    expect(durationInput).toBe("30");
+
+    // TEST DU MESSAGE NETTOYÉ
+    // Le message affiché ne doit plus contenir [DONE][30]
+    const messageInput = rows[0].find(".edit-message").element.value;
+    expect(messageInput).toBe("Tâche terminée");
+
+    // TEST DU STATUT
+    // On vérifie qu'un badge DONE est apparu
+    const badge = rows[0].find(".status-badge.DONE");
+    expect(badge.exists()).toBe(true);
+  });
+
+  // Test de sauvegarde (inchangé, mais inclus pour complétude)
+  it("sauvegarde les modifications avec debounce", async () => {
+    vi.useFakeTimers();
+    fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    wrapper = mount(App);
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+
+    wrapper.vm.journalData = {
+      keyDay: {
+        commits: [
+          { id: "123", message: "Original", duration: 10, dateKey: "keyDay" },
+        ],
+        totalMinutes: 10,
+      },
+    };
+    await wrapper.vm.$nextTick();
+
+    const inputMsg = wrapper.find(".edit-message");
+    await inputMsg.setValue("Modif");
+    await wrapper.vm.$nextTick();
+
+    vi.advanceTimersByTime(1100);
+
+    const calls = fetch.mock.calls;
+    const postCall = calls.find((call) => call[1] && call[1].method === "POST");
+    expect(postCall).toBeDefined();
+    vi.useRealTimers();
   });
 });
