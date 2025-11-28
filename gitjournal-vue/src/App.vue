@@ -1,41 +1,49 @@
 <script setup>
 import { ref, onMounted } from "vue";
-import { format, differenceInMinutes, parseISO } from "date-fns";
 import { fr } from "date-fns/locale";
+import { format, differenceInMinutes, parseISO } from "date-fns";
 import html2pdf from "html2pdf.js";
 
-// --- CONFIG ---
-const API_URL = "http://localhost:3000/edits"; // Adresse de notre serveur Node
+// Imports des composants et utils
+import ConfigPanel from "./components/ConfigPanel.vue";
+import DayCard from "./components/DayCard.vue";
+import { extractTags } from "./utils/gitParser";
+
+const API_URL = "http://localhost:3000/edits";
 const config = ref({ token: "", owner: "", repo: "", author: "" });
 
-// --- ÉTAT ---
+// État
 const savedEdits = ref({});
 const journalData = ref({});
 const loading = ref(false);
 const error = ref(null);
-const saveStatus = ref(""); // Pour afficher "Sauvegarde..."
+const saveStatus = ref("");
 
-// --- CHARGEMENT ---
+// Cache pour les commits GitHub
+let cachedRawCommits = [];
+
 onMounted(async () => {
-  // Config locale (reste dans le navigateur car c'est privé)
   config.value.token = localStorage.getItem("gj_token") || "";
   config.value.owner = localStorage.getItem("gj_owner") || "";
   config.value.repo = localStorage.getItem("gj_repo") || "";
   config.value.author = localStorage.getItem("gj_author") || "";
-
-  // Charger les edits depuis le SERVEUR
   await loadEditsFromServer();
+
+  // Initialiser l'animation du sapin
+  setTimeout(() => {
+    if (typeof window !== "undefined" && window.gsap) {
+      initTree();
+    }
+  }, 100);
 });
 
 const loadEditsFromServer = async () => {
   try {
     const res = await fetch(API_URL);
-    if (res.ok) {
-      savedEdits.value = await res.json();
-    }
+    if (res.ok) savedEdits.value = await res.json();
   } catch (e) {
-    console.error("Impossible de joindre le serveur local", e);
-    error.value = "Attention: Le serveur backend (port 3000) n'est pas lancé.";
+    console.error("Serveur backend injoignable");
+    error.value = "Info: Serveur de sauvegarde non détecté.";
   }
 };
 
@@ -46,22 +54,10 @@ const saveConfig = () => {
   localStorage.setItem("gj_author", config.value.author);
 };
 
-// --- SAUVEGARDE SUR SERVEUR (Avec Debounce) ---
+// --- SAUVEGARDE (Debounce) ---
 let timeoutId = null;
-
-const saveEdit = (commit) => {
-  // 1. Mise à jour immédiate de l'objet local (pour la réactivité UI)
-  savedEdits.value[commit.id] = {
-    message: commit.message,
-    duration: commit.duration,
-  };
-
-  // Recalcul du total local
-  updateTotal(commit.dateKey);
-
-  // 2. Envoi au serveur (Décalé de 500ms pour ne pas spammer le serveur quand on tape)
+const triggerSave = () => {
   saveStatus.value = "...";
-
   clearTimeout(timeoutId);
   timeoutId = setTimeout(async () => {
     try {
@@ -80,96 +76,156 @@ const saveEdit = (commit) => {
   }, 1000);
 };
 
-// --- LOGIQUE MÉTIER ---
+const handleCommitUpdate = (commit) => {
+  // On récupère l'existant (pour ne pas écraser isManual ou date)
+  const existing = savedEdits.value[commit.id] || {};
 
-const formatDuration = (minutes) => {
-  if (!minutes && minutes !== 0) return "0m";
-  const h = Math.floor(minutes / 60);
-  const m = minutes % 60;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
+  savedEdits.value[commit.id] = {
+    ...existing, // Important : garde les propriétés cachées comme 'isManual'
+    message: commit.message,
+    duration: commit.duration,
+    status: commit.status,
+  };
+  triggerSave();
 };
 
-const updateTotal = (dateKey) => {
-  const day = journalData.value[dateKey];
-  if (day) {
-    day.totalMinutes = day.commits.reduce(
-      (acc, c) => acc + (parseInt(c.duration) || 0),
-      0
+// --- AJOUT TACHE MANUELLE ---
+const addManualTask = (task) => {
+  const id = `manual_${Date.now()}`;
+  const now = new Date();
+
+  savedEdits.value[id] = {
+    message: task.message,
+    duration: task.duration,
+    status: task.status,
+    date: now.toISOString(),
+    isManual: true,
+  };
+
+  triggerSave();
+
+  // Rafraichit l'affichage immédiatement (sans rappeler GitHub)
+  processData(cachedRawCommits);
+};
+
+// --- LOGIQUE DE TRAITEMENT & FUSION ---
+const processData = (rawCommits) => {
+  // Mise à jour du cache si de nouveaux commits arrivent
+  if (rawCommits && rawCommits.length > 0) cachedRawCommits = rawCommits;
+
+  // 1. Traitement des commits GitHub
+  let processedItems = cachedRawCommits.map((commit, index) => {
+    const currentDate = parseISO(commit.commit.author.date);
+    const sha = commit.sha;
+
+    const { fullCleanMsg, manualDuration, status } = extractTags(
+      commit.commit.message
     );
-  }
+    const titleOnly = fullCleanMsg.split("\n")[0].trim();
+
+    // Calcul Auto
+    let autoDuration = 0;
+    if (index > 0) {
+      const prevDate = parseISO(cachedRawCommits[index - 1].commit.author.date);
+      const diff = differenceInMinutes(currentDate, prevDate);
+      if (diff < 180) autoDuration = diff;
+    }
+
+    const saved = savedEdits.value[sha];
+    let finalDuration = autoDuration;
+
+    // Priorités : Sauvegarde > Tag Manuel > Calcul Auto
+    if (manualDuration !== null) finalDuration = manualDuration;
+    if (saved && saved.duration !== undefined) finalDuration = saved.duration;
+
+    const finalMessage = saved?.message || titleOnly;
+    const finalStatus = saved?.status || status || "DONE";
+
+    return {
+      id: sha,
+      message: finalMessage,
+      date: currentDate,
+      timeStr: format(currentDate, "HH:mm"),
+      dateKey: format(currentDate, "EEEE d MMMM yyyy", { locale: fr }),
+      duration: finalDuration,
+      status: finalStatus,
+      url: commit.html_url,
+      isManual: false,
+    };
+  });
+
+  // 2. Injection des tâches MANUELLES depuis savedEdits
+  Object.keys(savedEdits.value).forEach((key) => {
+    const item = savedEdits.value[key];
+    if (item.isManual) {
+      const itemDate = parseISO(item.date);
+      processedItems.push({
+        id: key,
+        message: item.message,
+        date: itemDate,
+        timeStr: format(itemDate, "HH:mm"),
+        dateKey: format(itemDate, "EEEE d MMMM yyyy", { locale: fr }),
+        duration: item.duration,
+        status: item.status,
+        url: null,
+        isManual: true,
+      });
+    }
+  });
+
+  // 3. Tri par date décroissante
+  processedItems.sort((a, b) => b.date - a.date);
+
+  // 4. Groupement par jour
+  const grouped = {};
+  processedItems.forEach((c) => {
+    if (!grouped[c.dateKey])
+      grouped[c.dateKey] = { commits: [], totalMinutes: 0 };
+    grouped[c.dateKey].commits.push(c);
+    grouped[c.dateKey].totalMinutes += c.duration;
+  });
+
+  journalData.value = grouped;
 };
 
 const fetchCommits = async () => {
   saveConfig();
-  // On recharge les edits du serveur pour être sûr d'être à jour
   await loadEditsFromServer();
 
-  if (!config.value.owner || !config.value.repo) {
-    error.value = "Veuillez remplir le propriétaire et le dépôt.";
+  // On autorise l'affichage si on a au moins des tâches manuelles
+  if (
+    (!config.value.owner || !config.value.repo) &&
+    Object.keys(savedEdits.value).length === 0
+  ) {
+    error.value =
+      "Veuillez remplir le propriétaire et le dépôt ou ajouter une tâche.";
     return;
   }
 
   loading.value = true;
   error.value = null;
-  journalData.value = {};
 
   try {
-    let url = `https://api.github.com/repos/${config.value.owner}/${config.value.repo}/commits?per_page=100`;
-    if (config.value.author) url += `&author=${config.value.author}`;
-    const headers = { Accept: "application/vnd.github.v3+json" };
-    if (config.value.token)
-      headers["Authorization"] = `token ${config.value.token}`;
+    let rawCommits = [];
 
-    const res = await fetch(url, { headers });
-    if (!res.ok) throw new Error(`Erreur API: ${res.status}`);
+    // Fetch GitHub seulement si configuré
+    if (config.value.owner && config.value.repo) {
+      let url = `https://api.github.com/repos/${config.value.owner}/${config.value.repo}/commits?per_page=100`;
+      if (config.value.author) url += `&author=${config.value.author}`;
+      const headers = { Accept: "application/vnd.github.v3+json" };
+      if (config.value.token)
+        headers["Authorization"] = `token ${config.value.token}`;
 
-    let rawCommits = await res.json();
-    rawCommits.reverse();
+      const res = await fetch(url, { headers });
+      if (!res.ok) throw new Error(`Erreur API: ${res.status}`);
 
-    const processedCommits = rawCommits.map((commit, index) => {
-      const currentDate = parseISO(commit.commit.author.date);
-      const sha = commit.sha;
+      rawCommits = await res.json();
+      // Inversion pour le calcul temporel (Vieux -> Récent)
+      rawCommits.reverse();
+    }
 
-      // Calcul par défaut
-      let calculatedDuration = 0;
-      if (index > 0) {
-        const prevDate = parseISO(rawCommits[index - 1].commit.author.date);
-        const diff = differenceInMinutes(currentDate, prevDate);
-        if (diff < 180) calculatedDuration = diff;
-      }
-
-      // Fusion avec les données du SERVEUR
-      const saved = savedEdits.value[sha];
-      const finalMessage =
-        saved?.message || commit.commit.message.split("\n")[0];
-      const finalDuration =
-        saved && saved.duration !== undefined
-          ? saved.duration
-          : calculatedDuration;
-
-      return {
-        id: sha,
-        message: finalMessage,
-        date: currentDate,
-        timeStr: format(currentDate, "HH:mm"),
-        dateKey: format(currentDate, "EEEE d MMMM yyyy", { locale: fr }),
-        duration: finalDuration,
-        url: commit.html_url,
-      };
-    });
-
-    processedCommits.reverse();
-
-    const grouped = {};
-    processedCommits.forEach((c) => {
-      if (!grouped[c.dateKey])
-        grouped[c.dateKey] = { commits: [], totalMinutes: 0 };
-      grouped[c.dateKey].commits.push(c);
-      grouped[c.dateKey].totalMinutes += c.duration;
-    });
-
-    journalData.value = grouped;
+    // Traitement centralisé
+    processData(rawCommits);
   } catch (e) {
     error.value = e.message;
   } finally {
@@ -181,279 +237,522 @@ const exportPDF = () => {
   const element = document.getElementById("printable-area");
   const opt = {
     margin: 10,
-    filename: `Journal-${config.value.repo}.pdf`,
+    filename: `Journal-${config.value.repo || "Manuel"}.pdf`,
     image: { type: "jpeg", quality: 0.98 },
     html2canvas: { scale: 2, useCORS: true },
     jsPDF: { unit: "mm", format: "a4", orientation: "portrait" },
   };
   html2pdf().set(opt).from(element).save();
 };
+
+// --- CODE ANIMATION SAPIN (GSAP) ---
+const initTree = () => {
+  const gsap = window.gsap;
+  const MorphSVGPlugin = window.MorphSVGPlugin;
+  const MotionPathPlugin = window.MotionPathPlugin;
+
+  if (!gsap || !MorphSVGPlugin) {
+    console.warn("GSAP or Plugins not loaded yet");
+    return;
+  }
+
+  gsap.registerPlugin(
+    MorphSVGPlugin,
+    MotionPathPlugin,
+    window.DrawSVGPlugin,
+    window.Physics2DPlugin
+  );
+
+  function r(a) {
+    gsap.killTweensOf(a, { opacity: !0 });
+    gsap.fromTo(
+      a,
+      { opacity: 1 },
+      { duration: 0.07, opacity: Math.random(), repeat: -1 }
+    );
+  }
+  function t(a) {
+    e &&
+      ((a = l[d]),
+      gsap.set(a, {
+        x: gsap.getProperty(".pContainer", "x"),
+        y: gsap.getProperty(".pContainer", "y"),
+        scale: m(),
+      }),
+      gsap.timeline().to(a, {
+        duration: gsap.utils.random(0.61, 6),
+        physics2D: {
+          velocity: gsap.utils.random(-23, 23),
+          angle: gsap.utils.random(-180, 180),
+          gravity: gsap.utils.random(-6, 50),
+        },
+        scale: 0,
+        rotation: gsap.utils.random(-123, 360),
+        ease: "power1",
+        onStart: r,
+        onStartParams: [a],
+        onRepeat: function (b) {
+          gsap.set(b, { scale: m() });
+        },
+        onRepeatParams: [a],
+      }),
+      d++,
+      (d = 201 <= d ? 0 : d));
+  }
+
+  if (!document.querySelector(".pContainer")) return;
+
+  MorphSVGPlugin.convertToPath("polygon");
+  document.querySelector(".pContainer");
+  var u = document.querySelector(".mainSVG");
+  document.querySelector("#star");
+  var c = document.querySelector(".sparkle");
+  document.querySelector("#tree");
+  var e = !0,
+    n =
+      "#E8F6F8 #ACE8F8 #F6FBFE #A2CBDC #B74551 #5DBA72 #910B28 #910B28 #446D39".split(
+        " "
+      ),
+    p = ["#star", "#circ", "#cross", "#heart"],
+    l = [],
+    d = 0;
+  gsap.set("svg", { visibility: "visible" });
+  gsap.set(c, { transformOrigin: "50% 50%", y: -100 });
+  c = function (a) {
+    var b = [],
+      f = MotionPathPlugin.getRawPath(a)[0];
+    f.forEach(function (v, g) {
+      var h = {};
+      h.x = f[2 * g];
+      h.y = f[2 * g + 1];
+      g % 2 && b.push(h);
+    });
+    return b;
+  };
+  c(".treePath");
+  var q = c(".treeBottomPath");
+  c = gsap.timeline({ delay: 0, repeat: 0 });
+  var k,
+    m = gsap.utils.random(0.5, 3, 0.001, !0);
+  (function () {
+    for (var a = 201, b; -1 < --a; )
+      (b = document.querySelector(p[a % p.length]).cloneNode(!0)),
+        u.appendChild(b),
+        b.setAttribute("fill", n[a % n.length]),
+        b.setAttribute("class", "particle"),
+        l.push(b),
+        gsap.set(b, { x: -100, y: -100, transformOrigin: "50% 50%" });
+  })();
+  (function () {
+    k = gsap.timeline({ onUpdate: t });
+    k.to(".pContainer, .sparkle", {
+      duration: 6,
+      motionPath: { path: ".treePath", autoRotate: !1 },
+      ease: "linear",
+    })
+      .to(".pContainer, .sparkle", {
+        duration: 1,
+        onStart: function () {
+          e = !1;
+        },
+        x: q[0].x,
+        y: q[0].y,
+      })
+      .to(
+        ".pContainer, .sparkle",
+        {
+          duration: 2,
+          onStart: function () {
+            e = !0;
+          },
+          motionPath: { path: ".treeBottomPath", autoRotate: !1 },
+          ease: "linear",
+        },
+        "-=0"
+      )
+      .from(
+        ".treeBottomMask",
+        { duration: 2, drawSVG: "0% 0%", stroke: "#FFF", ease: "linear" },
+        "-=2"
+      );
+  })();
+  c.from([".treePathMask", ".treePotMask"], {
+    drawSVG: "0% 0%",
+    stroke: "#FFF",
+    stagger: { each: 6 },
+    duration: gsap.utils.wrap([6, 1, 2]),
+    ease: "linear",
+  })
+    .from(
+      ".treeStar",
+      {
+        duration: 3,
+        scaleY: 0,
+        scaleX: 0.15,
+        transformOrigin: "50% 50%",
+        ease: "elastic(1,0.5)",
+      },
+      "-=4"
+    )
+    .to(
+      ".sparkle",
+      {
+        duration: 3,
+        opacity: 0,
+        ease: "rough({strength: 2, points: 100, template: linear, taper: both, randomize: true, clamp: false})",
+      },
+      "-=0"
+    )
+    .to(
+      ".treeStarOutline",
+      {
+        duration: 1,
+        opacity: 1,
+        ease: "rough({strength: 2, points: 16, template: linear, taper: none, randomize: true, clamp: false})",
+      },
+      "+=1"
+    );
+  c.add(k, 0);
+  gsap.globalTimeline.timeScale(1.5);
+  k.vars.onComplete = function () {
+    gsap.to("#endMessage", { opacity: 1 });
+  };
+};
 </script>
 
 <template>
-  <div class="app-container">
-    <header class="no-print">
-      <h1><span class="icon">☁️</span> GitJournal Serveur</h1>
+  <div class="left-big-tree">
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <defs>
+        <filter id="glow">
+          <feGaussianBlur
+            class="blur"
+            result="coloredBlur"
+            stdDeviation="4"
+          ></feGaussianBlur>
+          <feMerge>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="SourceGraphic"></feMergeNode>
+          </feMerge>
+        </filter>
+      </defs>
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+    <svg class="tree" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 83 218">
+      <defs>
+        <filter id="glow2">
+          <feGaussianBlur
+            class="blur"
+            result="coloredBlur"
+            stdDeviation="4"
+          ></feGaussianBlur>
+          <feMerge>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="coloredBlur"></feMergeNode>
+            <feMergeNode in="SourceGraphic"></feMergeNode>
+          </feMerge>
+        </filter>
+      </defs>
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow2)"
+      ></path>
+    </svg>
+    <svg
+      v-for="n in 10"
+      :key="n"
+      class="tree"
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 83 218"
+    >
+      <path
+        d="M83 218H66v-28l-6-1-47-1c-14 0-16-3-8-15l22-34 3-4-9-1c-9-1-11-5-7-12l25-36 10-16c2-4 3-6-2-9s-2-6 0-9l22-34L83 0"
+        style="filter: url(#glow)"
+      ></path>
+    </svg>
+  </div>
 
-      <div class="config-box">
-        <div class="form-row">
-          <input
-            v-model="config.token"
-            type="password"
-            placeholder="Token GitHub (Optionnel)"
-            class="std-input"
-          />
-          <input
-            v-model="config.author"
-            type="text"
-            placeholder="Filtre Auteur"
-            class="std-input"
-          />
-        </div>
-        <div class="form-row">
-          <input
-            v-model="config.owner"
-            type="text"
-            placeholder="User/Org"
-            class="std-input"
-          />
-          <input
-            v-model="config.repo"
-            type="text"
-            placeholder="Repo"
-            class="std-input"
-          />
-          <button @click="fetchCommits" :disabled="loading" class="btn-gen">
-            {{ loading ? "..." : "Générer" }}
-          </button>
-        </div>
-        <div class="tips">
-          <small
-            >Status serveur :
-            <span
-              :class="{
-                ok: saveStatus.includes('✓'),
-                err: saveStatus.includes('Erreur'),
-              }"
-              >{{ saveStatus || "Prêt" }}</span
-            ></small
-          >
-        </div>
-        <button
-          v-if="Object.keys(journalData).length"
-          @click="exportPDF"
-          class="btn-pdf"
-        >
-          Télécharger en PDF
-        </button>
-      </div>
-      <div v-if="error" class="error">{{ error }}</div>
-    </header>
+  <div class="app-container">
+    <ConfigPanel
+      :config="config"
+      :loading="loading"
+      :saveStatus="saveStatus"
+      :hasData="Object.keys(journalData).length > 0"
+      @generate="fetchCommits"
+      @export="exportPDF"
+      @add-manual-task="addManualTask"
+    />
+
+    <div v-if="error" class="error">{{ error }}</div>
 
     <main id="printable-area">
       <div v-if="Object.keys(journalData).length" class="report-header">
-        <h2>Journal de bord : {{ config.repo }}</h2>
+        <h2>Journal : {{ config.repo }}</h2>
         <p>Généré le {{ new Date().toLocaleDateString() }}</p>
       </div>
 
-      <div v-for="(data, date) in journalData" :key="date" class="day-card">
-        <div class="day-header">
-          <h3>{{ date.charAt(0).toUpperCase() + date.slice(1) }}</h3>
-          <span class="daily-total"
-            >Total: {{ formatDuration(data.totalMinutes) }}</span
-          >
-        </div>
+      <DayCard
+        v-for="(data, date) in journalData"
+        :key="date"
+        :date="date"
+        :data="data"
+        @commit-updated="handleCommitUpdate"
+      />
 
-        <div class="timeline">
-          <div
-            v-for="commit in data.commits"
-            :key="commit.id"
-            class="commit-row"
-          >
-            <div class="time-col">
-              <div class="time">{{ commit.timeStr }}</div>
-              <div class="duration-wrapper">
-                <input
-                  type="number"
-                  v-model.number="commit.duration"
-                  @input="saveEdit(commit)"
-                  class="edit-duration"
-                  min="0"
-                />
-                <span class="min-label">min</span>
-              </div>
-            </div>
-            <div class="content-col">
-              <input
-                v-model="commit.message"
-                @input="saveEdit(commit)"
-                class="edit-message"
-              />
-            </div>
-          </div>
-        </div>
+      <div
+        v-if="!loading && Object.keys(journalData).length === 0 && !error"
+        class="empty-state"
+      >
+        <p style="text-align: center; color: #aaa; margin-top: 20px">
+          Aucune activité. Lancez une génération ou ajoutez une tâche manuelle.
+        </p>
       </div>
     </main>
+  </div>
+
+  <div class="right-big-tree">
+    <svg
+      class="mainSVG"
+      xmlns="http://www.w3.org/2000/svg"
+      xmlns:xlink="http://www.w3.org/1999/xlink"
+      viewBox="0 0 800 600"
+    >
+      <defs>
+        <circle id="circ" class="particle" cx="0" cy="0" r="1" />
+        <polygon
+          id="star"
+          class="particle"
+          points="4.55,0 5.95,2.85 9.1,3.3 6.82,5.52 7.36,8.65 4.55,7.17 1.74,8.65 2.27,5.52 0,3.3 3.14,2.85 "
+        />
+        <polygon
+          id="cross"
+          class="particle"
+          points="4,3.5 2.5,2 4,0.5 3.5,0 2,1.5 0.5,0 0,0.5 1.5,2 0,3.5 0.5,4 2,2.5 3.5,4 "
+        />
+        <path
+          id="heart"
+          class="particle"
+          d="M2.9,0C2.53,0,2.2,0.18,2,0.47C1.8,0.18,1.47,0,1.1,0C0.49,0,0,0.49,0,1.1C0,2.6,1.56,4,2,4s2-1.4,2-2.9C4,0.49,3.51,0,2.9,0z"
+        />
+        <radialGradient
+          id="grad"
+          cx="3"
+          cy="3"
+          r="6"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0" style="stop-color: red" />
+          <stop offset="0.4" style="stop-color: #334673" />
+          <stop offset="0.6" style="stop-color: #edddc4" />
+          <stop offset="0.9" style="stop-color: #fee8c7" />
+          <stop offset="1" style="stop-color: red" />
+        </radialGradient>
+        <radialGradient
+          id="dotGrad"
+          cx="0"
+          cy="0"
+          r="50"
+          gradientUnits="userSpaceOnUse"
+        >
+          <stop offset="0" style="stop-color: #ffffff; stop-opacity: 1" />
+          <stop offset="0.1" style="stop-color: #0867c7; stop-opacity: 0.6" />
+          <stop offset="1" style="stop-color: #081029; stop-opacity: 0" />
+        </radialGradient>
+        <mask id="treePathMask">
+          <path
+            class="treePathMask"
+            fill="none"
+            stroke-width="18"
+            stroke="#FFF"
+            d="M252.9,447.9c0,0-30.8-21.6,33.9-44.7c64.7-23.1,46.2-37,33.9-41.6c-12.3-4.6-59.3-11.6-42.4-28.5s114-52.4,81.7-66.2c-32.4-13.9-58.5-10.8-35.4-29.3s66.2-101.7,70.9-115.6c4.4-13.2,16.9-18.5,24.7,0c7.7,18.5,44.7,100.1,67.8,115.6c23.1,15.4-10.8,21.6-26.2,24.7c-15.4,3.1-20,33.9,33.9,49.3c53.9,15.4,47.8,40.1,27.7,44.7c-20,4.6-63.2,4.6-27.7,32.4s98.6,21.6,61.6,60.1"
+          />
+        </mask>
+        <mask id="treeBottomMask">
+          <path
+            class="treeBottomMask"
+            stroke="#FFF"
+            stroke-width="8"
+            d="M207.5,484.1c0,0,58.5-43.1,211.1-3.1s191-16.9,191-16.9"
+          />
+        </mask>
+        <mask id="treePotMask">
+          <path
+            class="treePotMask"
+            stroke="#FFF"
+            stroke-width="8"
+            d="M374.3,502.5c0,0-4.6,20,7.7,29.3c12.3,9.2,40.1,7.7,50.8,0s10.8-23.1,10.8-29.3"
+          />
+        </mask>
+        <filter id="glow" x="-150%" y="-150%" width="280%" height="280%">
+          <feOffset result="offOut" in="SourceGraphic" dx="0" dy="0" />
+          <feGaussianBlur in="offOut" stdDeviation="16" result="blur" />
+          <feComponentTransfer>
+            <feFuncR type="discrete" tableValues="0.8" />
+            <feFuncG type="discrete" tableValues="0.3" />
+            <feFuncB type="discrete" tableValues="0.2" />
+          </feComponentTransfer>
+          <feComposite in="SourceGraphic" operator="over" />
+        </filter>
+      </defs>
+      <g class="whole">
+        <g class="pContainer"></g>
+        <g class="tree-right-inner" mask="url(#treePathMask)">
+          <path
+            d="M252.95,447.85a20.43,20.43,0,0,1-5.64-6.24,14,14,0,0,1-1.91-8.22,16.93,16.93,0,0,1,3.06-8,33.16,33.16,0,0,1,5.79-6.28A74.78,74.78,0,0,1,268.54,410a163.48,163.48,0,0,1,15.52-6.84c10.54-3.93,21-8.07,30.72-13.46a80.83,80.83,0,0,0,7-4.37,37.51,37.51,0,0,0,6.13-5.24c1.75-1.92,3.14-4.18,3.25-6.35s-1.12-4.18-3-5.81a25,25,0,0,0-6.72-3.91,61.25,61.25,0,0,0-7.8-2.42c-5.41-1.4-10.91-2.72-16.38-4.32a84.17,84.17,0,0,1-16.2-6.19,28.26,28.26,0,0,1-3.86-2.5,15.06,15.06,0,0,1-3.44-3.63,9,9,0,0,1-1.51-5.47,10.22,10.22,0,0,1,.61-2.78,12.88,12.88,0,0,1,1.2-2.34,26.73,26.73,0,0,1,6.58-6.56c2.35-1.76,4.76-3.33,7.19-4.84,4.87-3,9.82-5.75,14.77-8.46,9.91-5.4,19.88-10.59,29.63-16.08,4.87-2.75,9.68-5.56,14.33-8.56A81.88,81.88,0,0,0,359.45,280a23,23,0,0,0,2.41-2.79,8.36,8.36,0,0,0,1.35-2.65,2.13,2.13,0,0,0-.17-1.7,5.53,5.53,0,0,0-1.88-1.77,13.15,13.15,0,0,0-1.49-.83c-.52-.26-1.1-.49-1.76-.77-1.27-.53-2.55-1-3.83-1.53q-3.86-1.48-7.8-2.77c-5.26-1.74-10.6-3.23-16-4.79-2.72-.79-5.47-1.58-8.29-2.61a31.74,31.74,0,0,1-4.33-1.92,14.39,14.39,0,0,1-2.29-1.53,8.74,8.74,0,0,1-2.22-2.66,7.2,7.2,0,0,1-.78-4,9.09,9.09,0,0,1,1-3.24,18.93,18.93,0,0,1,3-4.21,44.88,44.88,0,0,1,3.29-3.19c.56-.5,1.12-1,1.68-1.45l1.61-1.33a84,84,0,0,0,10.88-11.88,326.2,326.2,0,0,0,18.79-27.53c5.88-9.5,11.48-19.19,16.89-29S380.1,146.16,385,136.13c1.22-2.51,2.42-5,3.57-7.54s2.29-5.09,3.14-7.45l.36-1c.14-.38.26-.75.42-1.12.29-.75.64-1.48,1-2.21a25.51,25.51,0,0,1,2.65-4.21,19.15,19.15,0,0,1,3.76-3.69,13.74,13.74,0,0,1,5.24-2.42,12.11,12.11,0,0,1,6.12.25,14.59,14.59,0,0,1,5,2.79,20.59,20.59,0,0,1,3.47,3.79,30.33,30.33,0,0,1,2.5,4.1c.35.7.7,1.39,1,2.1l.46,1.05.4,1,1.64,3.84,3.39,7.67q6.88,15.32,14.36,30.37c5,10,10.18,19.94,15.69,29.65a274.94,274.94,0,0,0,17.9,28A73.36,73.36,0,0,0,487.74,233c.49.4,1,.8,1.48,1.15l1.7,1.19a35,35,0,0,1,3.66,3,17.84,17.84,0,0,1,3.32,4.08,10.83,10.83,0,0,1,1.14,2.94,8.54,8.54,0,0,1,0,3.54,10.27,10.27,0,0,1-3.22,5.39,20.71,20.71,0,0,1-4.15,2.91,49,49,0,0,1-8.4,3.46,154,154,0,0,1-16.77,4.09l-4.15.81a9.18,9.18,0,0,0-2.87,1.08,9.51,9.51,0,0,0-4,4.7,12.55,12.55,0,0,0-.67,6.58,19.5,19.5,0,0,0,2.46,6.74A37.19,37.19,0,0,0,468,295.75a75,75,0,0,0,14.14,7.86,129.67,129.67,0,0,0,15.58,5.49A141.4,141.4,0,0,1,513.88,315a75,75,0,0,1,15.19,8.65,37.29,37.29,0,0,1,6.55,6.24,21.05,21.05,0,0,1,4.31,8.49,14.43,14.43,0,0,1-1.24,9.88,18.08,18.08,0,0,1-6.66,6.94,26.74,26.74,0,0,1-8.56,3.33c-2.84.61-5.65,1.06-8.44,1.49-5.58.86-11.13,1.61-16.52,2.77a53.48,53.48,0,0,0-7.81,2.22c-2.43.94-4.81,2.22-6,3.93a4.34,4.34,0,0,0-.77,2.82,8.45,8.45,0,0,0,1,3.29,28,28,0,0,0,4.82,6.25,80.74,80.74,0,0,0,12.81,10.4c9.29,6,19.72,10.29,30.24,14.17,5.27,1.95,10.59,3.79,15.85,5.86,2.63,1,5.24,2.14,7.79,3.39a37.94,37.94,0,0,1,7.28,4.51,11.9,11.9,0,0,1,3.63,15.57,34.68,34.68,0,0,1-4.53,7.16,77.45,77.45,0,0,1-5.64,6.29,77.31,77.31,0,0,0,5.41-6.46,34.27,34.27,0,0,0,4.22-7.21,12.64,12.64,0,0,0,.88-8,12.44,12.44,0,0,0-4.71-6.43,37.71,37.71,0,0,0-7.15-4.16c-2.53-1.16-5.13-2.18-7.76-3.14-5.26-1.91-10.62-3.62-16-5.44-10.65-3.63-21.34-7.64-31.11-13.64a83.84,83.84,0,0,1-13.61-10.49,31.27,31.27,0,0,1-5.6-6.94,12,12,0,0,1-1.55-4.68,8.17,8.17,0,0,1,.19-2.7,8.56,8.56,0,0,1,1.09-2.5,12.1,12.1,0,0,1,3.6-3.44,24.27,24.27,0,0,1,4.08-2.08,57.3,57.3,0,0,1,8.36-2.56c5.59-1.31,11.19-2.17,16.71-3.12,2.76-.48,5.5-1,8.15-1.59a22.1,22.1,0,0,0,7-2.87,13.3,13.3,0,0,0,4.82-5.15,9.42,9.42,0,0,0,.69-6.53,16,16,0,0,0-3.42-6.33,33.25,33.25,0,0,0-5.73-5.27,69.74,69.74,0,0,0-14.19-7.8,135.81,135.81,0,0,0-15.61-5.42,135.53,135.53,0,0,1-16.3-5.51,81,81,0,0,1-15.41-8.31,43.39,43.39,0,0,1-12.6-13,25.53,25.53,0,0,1-3.34-9,19.13,19.13,0,0,1,1-10,16.17,16.17,0,0,1,6.69-8,15.88,15.88,0,0,1,5-1.93l4.13-.84a147.75,147.75,0,0,0,16-4,42.41,42.41,0,0,0,7.17-3,14,14,0,0,0,2.74-1.92,3.42,3.42,0,0,0,1.12-1.68,2.41,2.41,0,0,0-.43-1.61,11.07,11.07,0,0,0-2-2.4,28,28,0,0,0-2.92-2.31l-1.76-1.22c-.65-.46-1.26-.94-1.86-1.43a59,59,0,0,1-6.43-6.27c-2-2.19-3.79-4.44-5.54-6.74a267,267,0,0,1-18.55-28.74c-5.63-9.85-10.89-19.86-16-30s-9.91-20.31-14.57-30.61l-3.45-7.76L417,124.48l-.42-1-.39-.88c-.25-.59-.54-1.15-.82-1.71a22.74,22.74,0,0,0-1.89-3.09,13,13,0,0,0-2.2-2.42,7,7,0,0,0-2.31-1.33,4.49,4.49,0,0,0-2.22-.09,8.55,8.55,0,0,0-4.59,3.32,17.85,17.85,0,0,0-1.84,2.92c-.26.54-.51,1.07-.73,1.64-.12.27-.22.56-.32.85l-.35,1c-1.06,2.93-2.23,5.47-3.42,8.1s-2.42,5.16-3.67,7.7c-5,10.18-10.29,20.16-15.77,30.05s-11.17,19.66-17.16,29.28a310.2,310.2,0,0,1-19.39,28.11,90.46,90.46,0,0,1-12,12.85l-1.65,1.35c-.52.43-1,.85-1.53,1.29a38,38,0,0,0-2.79,2.65,12.42,12.42,0,0,0-1.94,2.57,2.33,2.33,0,0,0-.28.76c0,.11,0,0,0,.09a4.57,4.57,0,0,0,1.7,1.35,25.15,25.15,0,0,0,3.36,1.51c2.46.92,5.11,1.72,7.79,2.52,5.36,1.58,10.84,3.16,16.25,5q4.06,1.37,8.08,2.94c1.34.53,2.67,1.07,4,1.63.64.27,1.36.57,2.1.94a19.66,19.66,0,0,1,2.18,1.24,11.85,11.85,0,0,1,4,4.13,8.64,8.64,0,0,1,1,3.24,9.11,9.11,0,0,1-.27,3.23,14.48,14.48,0,0,1-2.42,4.85,29.32,29.32,0,0,1-3.14,3.56,87.46,87.46,0,0,1-14,10.47c-4.85,3-9.79,5.84-14.76,8.55-9.94,5.42-20,10.49-29.91,15.72-5,2.62-9.88,5.28-14.63,8.12-2.37,1.42-4.7,2.89-6.88,4.46a22.06,22.06,0,0,0-5.45,5.14,8,8,0,0,0-.76,1.39,5.36,5.36,0,0,0-.33,1.32,4.1,4.1,0,0,0,.69,2.53,15.62,15.62,0,0,0,5.49,4.62A80.14,80.14,0,0,0,298.56,353c5.31,1.66,10.73,3.06,16.18,4.58a64.81,64.81,0,0,1,8.26,2.74,27.74,27.74,0,0,1,7.69,4.74,13.65,13.65,0,0,1,3,3.81,9.27,9.27,0,0,1,1,5,11.14,11.14,0,0,1-1.54,4.7,19.09,19.09,0,0,1-2.8,3.67,40.6,40.6,0,0,1-6.81,5.54,83.78,83.78,0,0,1-7.41,4.35c-10.11,5.26-20.76,9.16-31.39,12.82a161.69,161.69,0,0,0-15.52,6.37A74.57,74.57,0,0,0,255,420a32.17,32.17,0,0,0-5.82,5.89,16.21,16.21,0,0,0-3.19,7.52,13.61,13.61,0,0,0,1.59,8A20.29,20.29,0,0,0,252.95,447.85Z"
+            fill="#cb9866"
+          />
+          <path
+            d="M207.5,484.06c7.05-5.11,15.14-8.66,23.34-11.63a177.13,177.13,0,0,1,25.29-6.88,263.65,263.65,0,0,1,52.22-4.49h3.28l3.28.09,6.56.19,6.55.39c2.18.13,4.37.26,6.54.48,4.35.39,8.71.74,13,1.28l6.51.75,6.49.91c17.3,2.5,34.41,6,51.36,10.19l12.62,3.2c4.18,1,8.34,2.18,12.55,3.06,8.38,2,16.82,3.63,25.29,5.13a353.5,353.5,0,0,0,51.17,5.47c17.11.32,34.36-.66,51-4.7a118.55,118.55,0,0,0,24.21-8.47,84.82,84.82,0,0,0,11.11-6.49,47.55,47.55,0,0,0,9.69-8.53,48.1,48.1,0,0,1-9,9.45,85.1,85.1,0,0,1-10.81,7.45,116.56,116.56,0,0,1-24.23,10.24,165.66,165.66,0,0,1-25.79,5.35,232.1,232.1,0,0,1-26.27,1.71c-8.77,0-17.55-.24-26.26-1.09-2.18-.2-4.37-.35-6.54-.6l-6.52-.78c-4.36-.46-8.67-1.19-13-1.82-8.64-1.37-17.22-3.09-25.74-5-4.28-.87-8.5-2-12.75-3l-12.62-3.11q-25.06-6.37-50.58-10.47a426.37,426.37,0,0,0-51.3-5.3c-8.59-.42-17.19-.29-25.78,0a240.1,240.1,0,0,0-25.68,2.24,186.57,186.57,0,0,0-25.27,5.19c-4.15,1.16-8.26,2.49-12.28,4.05-2,.79-4,1.6-6,2.52A50.82,50.82,0,0,0,207.5,484.06Z"
+            fill="#cb9866"
+          />
+          <path
+            d="M374.32,502.55a48.15,48.15,0,0,0,1.24,14.35c1.15,4.52,3.29,8.64,6.49,11.35a18.5,18.5,0,0,0,5.51,3.14,39.06,39.06,0,0,0,6.41,1.82,65.78,65.78,0,0,0,13.68,1.12,72.9,72.9,0,0,0,13.72-1.44,44.51,44.51,0,0,0,6.46-1.85,17.75,17.75,0,0,0,5.51-3.15,25.45,25.45,0,0,0,7.24-11.17,52,52,0,0,0,1.9-6.91c.48-2.37.83-4.8,1.18-7.25a55.16,55.16,0,0,1,.64,7.42,40.11,40.11,0,0,1-.52,7.56,31.23,31.23,0,0,1-2.19,7.5,24.37,24.37,0,0,1-4.46,6.79,25.16,25.16,0,0,1-6.61,5,39.72,39.72,0,0,1-7.4,3A58.55,58.55,0,0,1,407.75,542a55,55,0,0,1-15.47-1.9,36.65,36.65,0,0,1-7.46-3,25.3,25.3,0,0,1-6.6-5,19.63,19.63,0,0,1-2.5-3.34,21.72,21.72,0,0,1-1.79-3.67,27.66,27.66,0,0,1-1.65-7.7,38.16,38.16,0,0,1,2-14.87Z"
+            fill="#cb9866"
+          />
+        </g>
+        <path
+          class="treeBottomPath"
+          stroke="none"
+          fill="none"
+          stroke-width="8"
+          d="M207.5,484.1c0,0,58.5-43.1,211.1-3.1s191-16.9,191-16.9"
+        />
+        <path
+          class="treePath"
+          fill="none"
+          stroke="none"
+          stroke-miterlimit="10"
+          d="M252.95,447.85s-30.81-21.57,33.89-44.68,46.22-37,33.89-41.6-59.32-11.56-42.37-28.5,114-52.38,81.66-66.25S301.48,256,324.59,237.55,390.84,135.87,395.46,122c4.41-13.24,16.95-18.49,24.65,0s44.68,100.14,67.79,115.55-10.78,21.57-26.19,24.65-20,33.89,33.89,49.3,47.76,40.06,27.73,44.68-63.17,4.62-27.73,32.35,98.6,21.57,61.63,60.09"
+        />
+        <path
+          class="treeBottom"
+          mask="url(#treeBottomMask)"
+          d="M207.5,484.06c7.05-5.11,15.14-8.66,23.34-11.63a177.13,177.13,0,0,1,25.29-6.88,263.65,263.65,0,0,1,52.22-4.49h3.28l3.28.09,6.56.19,6.55.39c2.18.13,4.37.26,6.54.48,4.35.39,8.71.74,13,1.28l6.51.75,6.49.91c17.3,2.5,34.41,6,51.36,10.19l12.62,3.2c4.18,1,8.34,2.18,12.55,3.06,8.38,2,16.82,3.63,25.29,5.13a353.5,353.5,0,0,0,51.17,5.47c17.11.32,34.36-.66,51-4.7a118.55,118.55,0,0,0,24.21-8.47,84.82,84.82,0,0,0,11.11-6.49,47.55,47.55,0,0,0,9.69-8.53,48.1,48.1,0,0,1-9,9.45,85.1,85.1,0,0,1-10.81,7.45,116.56,116.56,0,0,1-24.23,10.24,165.66,165.66,0,0,1-25.79,5.35,232.1,232.1,0,0,1-26.27,1.71c-8.77,0-17.55-.24-26.26-1.09-2.18-.2-4.37-.35-6.54-.6l-6.52-.78c-4.36-.46-8.67-1.19-13-1.82-8.64-1.37-17.22-3.09-25.74-5-4.28-.87-8.5-2-12.75-3l-12.62-3.11q-25.06-6.37-50.58-10.47a426.37,426.37,0,0,0-51.3-5.3c-8.59-.42-17.19-.29-25.78,0a240.1,240.1,0,0,0-25.68,2.24,186.57,186.57,0,0,0-25.27,5.19c-4.15,1.16-8.26,2.49-12.28,4.05-2,.79-4,1.6-6,2.52A50.82,50.82,0,0,0,207.5,484.06Z"
+          fill="#cb9866"
+        />
+        <path
+          class="treePot"
+          mask="url(#treePotMask)"
+          d="M374.32,502.55a48.15,48.15,0,0,0,1.24,14.35c1.15,4.52,3.29,8.64,6.49,11.35a18.5,18.5,0,0,0,5.51,3.14,39.06,39.06,0,0,0,6.41,1.82,65.78,65.78,0,0,0,13.68,1.12,72.9,72.9,0,0,0,13.72-1.44,44.51,44.51,0,0,0,6.46-1.85,17.75,17.75,0,0,0,5.51-3.15,25.45,25.45,0,0,0,7.24-11.17,52,52,0,0,0,1.9-6.91c.48-2.37.83-4.8,1.18-7.25a55.16,55.16,0,0,1,.64,7.42,40.11,40.11,0,0,1-.52,7.56,31.23,31.23,0,0,1-2.19,7.5,24.37,24.37,0,0,1-4.46,6.79,25.16,25.16,0,0,1-6.61,5,39.72,39.72,0,0,1-7.4,3A58.55,58.55,0,0,1,407.75,542a55,55,0,0,1-15.47-1.9,36.65,36.65,0,0,1-7.46-3,25.3,25.3,0,0,1-6.6-5,19.63,19.63,0,0,1-2.5-3.34,21.72,21.72,0,0,1-1.79-3.67,27.66,27.66,0,0,1-1.65-7.7,38.16,38.16,0,0,1,2-14.87Z"
+          fill="#cb9866"
+        />
+        <g class="treeStar">
+          <path
+            class="treeStarOutline"
+            opacity="0"
+            d="M421,53.27c5,.83,10.08,1.52,15.15,2.13l3.8.45,1.9.21c.33,0,.6.06,1,.12a2.41,2.41,0,0,1,1.27.66,2.52,2.52,0,0,1,.56,2.76,3.42,3.42,0,0,1-.78,1.07l-.66.69-2.65,2.77c-1.78,1.83-3.54,3.68-5.35,5.48l-2.7,2.71L429.81,75l-.69.67-.34.33,0,0h0a.14.14,0,0,0,0-.08s0-.07,0,0l0,.24.07.47.57,3.78c.4,2.52.71,5,1.06,7.57l.94,7.59.22,1.9c0,.06,0,.19,0,.34a2.21,2.21,0,0,1,0,.43,2.72,2.72,0,0,1-.21.84,2.85,2.85,0,0,1-2.65,1.75,2.57,2.57,0,0,1-.82-.14,3.12,3.12,0,0,1-.65-.3l-1.64-1-6.58-3.91-6.63-3.81-3.34-1.86-.42-.23-.21-.12-.14-.07a1,1,0,0,0-.59,0,1.15,1.15,0,0,0-.31.12l-.43.22-.85.44c-2.27,1.17-4.54,2.31-6.79,3.52s-4.51,2.38-6.74,3.61l-3.36,1.83-.84.46a3.07,3.07,0,0,1-1.28.44,2.68,2.68,0,0,1-2.84-3l.15-1,.29-1.89.57-3.78,1.18-7.56,1.24-7.52a.13.13,0,0,0,0,.08l0,0-.1-.09-.17-.17-1.37-1.34-2.73-2.68-10.93-10.7-.34-.33a4,4,0,0,1-.64-.84,3.63,3.63,0,0,1-.43-2.12,3.68,3.68,0,0,1,2.64-3.17l.52-.11.25,0,.47-.06.95-.12,1.9-.25,7.58-1,7.6-.9,1.9-.23.95-.11c.24,0,.11,0,.09,0l-.09.05-.07.08,0,0,.09-.16.46-.84.91-1.68c2.41-4.5,4.95-8.92,7.51-13.34l1-1.66.48-.83.24-.41.13-.23a3.49,3.49,0,0,1,.22-.33,2.66,2.66,0,0,1,2.83-.9,2.52,2.52,0,0,1,1.26.84,2.85,2.85,0,0,1,.37.62l.18.44q1.45,3.54,3,7.06c1,2.36,2,4.68,3.06,7,.51,1.17,1.06,2.32,1.59,3.48l.8,1.74a2.12,2.12,0,0,0,.45.75A1.42,1.42,0,0,0,421,53.27Zm-.06.39a1.82,1.82,0,0,1-1-.46,2.52,2.52,0,0,1-.56-.86l-.84-1.72c-.56-1.14-1.11-2.3-1.69-3.43-1.17-2.27-2.29-4.56-3.5-6.81s-2.39-4.51-3.6-6.76l-.23-.42a.8.8,0,0,0-.14-.18.58.58,0,0,0-.33-.15.56.56,0,0,0-.57.28L407,36.48c-2.09,4.66-4.2,9.31-6.45,13.88l-.83,1.72-.42.86-.13.27a3.57,3.57,0,0,1-2,1.67,4.26,4.26,0,0,1-.84.18l-.95.13-1.89.27L386,56.53l-7.58,1-3.49.44a.45.45,0,0,0,.34-.4.51.51,0,0,0-.07-.28s-.06-.08-.07-.08l.33.34,10.65,11,2.66,2.75,1.33,1.37.4.42a3.41,3.41,0,0,1,.53.84,3.36,3.36,0,0,1,.24,1.95c-.53,2.56-1,5-1.57,7.52L388,90.85l-.83,3.73-.42,1.87-.2.9a.5.5,0,0,0,0,.3.58.58,0,0,0,.52.37,6.28,6.28,0,0,0,1.38-.58l3.46-1.62q3.47-1.61,6.9-3.3c2.3-1.1,4.57-2.26,6.85-3.39l.86-.43.43-.21a2.55,2.55,0,0,1,.57-.22,2.21,2.21,0,0,1,1.29.08l.29.13.21.11.42.23,3.37,1.81,6.8,3.51,6.85,3.41,1.71.85c.19.09.15.07.22.08a.25.25,0,0,0,.12,0,.42.42,0,0,0,.21-.1.33.33,0,0,0,.1-.19.2.2,0,0,0,0-.09.1.1,0,0,0,0,0l0-.13L428.74,96l-1.42-7.52c-.43-2.51-.9-5-1.29-7.54l-.6-3.78-.08-.47,0-.24a3.75,3.75,0,0,1,0-.45,3.37,3.37,0,0,1,.52-1.9,3.33,3.33,0,0,1,.3-.4,3.73,3.73,0,0,1,.3-.3l.35-.32.7-.65,2.81-2.59,2.86-2.54c1.9-1.71,3.84-3.36,5.77-5l2.91-2.49a12.91,12.91,0,0,0,1.15-1,.7.7,0,0,0-.06-.79.73.73,0,0,0-.37-.26c-.23-.06-.6-.13-.89-.2l-1.87-.4L436,56.39C431,55.39,426,54.45,420.95,53.66Z"
+            fill="#FFFCF9"
+          />
+          <path
+            d="M408.12,83.45l-17.78,8.94,3.72-19.55-14-14.15,19.74-2.5,9.13-17.68,8.48,18L437,59.73l-14.5,13.63,3,19.67Z"
+            fill="#C89568"
+          />
+        </g>
+        <circle class="sparkle" fill="url(#dotGrad)" cx="0" cy="0" r="50" />
+      </g>
+      <foreignObject id="endMessage" x="0" y="550" width="800" height="250">
+        <span class="endMessage"> Merry Christmas! </span>
+      </foreignObject>
+    </svg>
   </div>
 </template>
 
 <style scoped>
+/* ===============================
+   🎄 SAPIN GAUCHE (GSAP principal)
+   =============================== */
+.mainSVG {
+  position: fixed !important;
+  right: 0 !important;
+  top: 190px !important;
+  width: 680px !important; /* ← taille réduite */
+  height: auto !important;
+  opacity: 0.7;
+  pointer-events: none;
+  z-index: 0 !important;
+}
+
+/* Empêche les SVG des sapins d’apparaître devant l’UI */
+.app-container,
+header,
+main {
+  position: relative;
+  z-index: 10;
+}
+
+/* --- Sapin GSAP FIXE À GAUCHE --- */
+.left-big-tree {
+  position: fixed;
+  top: 240px; /* Ajuste la hauteur si tu veux */
+  left: 120px;
+  width: 160px; /* Taille du sapin */
+  height: 500px;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.7;
+}
+
+/* --- Sapin GSAP FIXE À DROITE --- */
+.right-big-tree {
+  position: fixed;
+  top: 80px; /* même hauteur */
+  right: 40px;
+  width: 260px; /* même taille */
+  height: auto;
+  pointer-events: none;
+  z-index: 1;
+  opacity: 0.9;
+}
+
+/* Empêche le SVG principal d’être déformé */
+.left-big-tree svg,
+.right-big-tree svg {
+  width: 100%;
+  height: auto;
+}
+
+#endMessage {
+  font-family: mountains_of_christmasregular;
+  font-size: 2rem;
+  text-anchor: middle;
+  text-align: center;
+  fill: #ffffff;
+  color: #ffffff;
+  opacity: 0;
+  letter-spacing: 1px;
+}
+
+a {
+  color: white;
+  text-decoration: underline dotted #ffffff;
+}
+a:visited {
+  color: red;
+}
 :root {
   --primary: #42b883;
 }
 .app-container {
   font-family: "Inter", sans-serif;
   max-width: 800px;
-  margin: 0 auto;
+  width: 520px;
+  margin: 0;
   padding: 20px;
   color: #2c3e50;
 }
-.config-box {
-  background: white;
-  padding: 20px;
-  border-radius: 12px;
-  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
-  margin-bottom: 30px;
-}
-.std-input {
-  flex: 1;
-  padding: 10px;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-}
-.form-row {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 10px;
-}
-.btn-gen {
-  background: #42b883;
-  color: white;
-  border: none;
-  padding: 0 20px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-.btn-pdf {
-  width: 100%;
-  background: #35495e;
-  color: white;
-  border: none;
-  padding: 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  margin-top: 10px;
-}
-.tips {
-  text-align: center;
-  color: #666;
-  margin-top: 5px;
-  font-size: 0.9em;
-  height: 20px;
-}
-.ok {
-  color: #42b883;
-  font-weight: bold;
-}
-.err {
+.error {
   color: #e74c3c;
   font-weight: bold;
-}
-.day-card {
-  background: white;
-  border-radius: 8px;
-  padding: 20px;
+  text-align: center;
   margin-bottom: 20px;
-  border: 1px solid #eee;
-  page-break-inside: avoid;
-}
-.day-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 2px solid #f0f0f0;
-  padding-bottom: 10px;
-  margin-bottom: 15px;
-}
-.day-header h3 {
-  margin: 0;
-  color: #35495e;
-  font-size: 1.2em;
-}
-.daily-total {
-  background: #eefbf4;
-  color: #42b883;
-  padding: 4px 10px;
-  border-radius: 20px;
-  font-weight: bold;
-  font-size: 0.9em;
-}
-.commit-row {
-  display: flex;
-  margin-bottom: 12px;
-  align-items: flex-start;
-}
-.time-col {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  margin-right: 15px;
-  min-width: 70px;
-}
-.time {
-  font-weight: bold;
-  color: #35495e;
-  font-size: 0.9em;
-  margin-bottom: 2px;
-}
-.duration-wrapper {
-  display: flex;
-  align-items: center;
-  background: #f3f4f6;
-  padding: 2px 6px;
-  border-radius: 4px;
-}
-.edit-duration {
-  width: 35px;
-  background: transparent;
-  border: none;
-  text-align: right;
-  font-family: inherit;
-  font-size: 0.85em;
-  color: #666;
-  font-weight: bold;
-  outline: none;
-  -moz-appearance: textfield;
-}
-.edit-duration:focus {
-  color: #42b883;
-  border-bottom: 1px solid #42b883;
-}
-.edit-message {
-  width: 100%;
-  border: 1px solid transparent;
-  font-family: inherit;
-  font-size: 1em;
-  color: #333;
-  background: transparent;
-  padding: 4px;
-  border-radius: 4px;
-  outline: none;
-  transition: all 0.2s;
-}
-.edit-message:hover {
-  background-color: #f9f9f9;
-  border-color: #eee;
-}
-.edit-message:focus {
-  background-color: white;
-  border-color: #42b883;
-  box-shadow: 0 0 0 2px rgba(66, 184, 131, 0.1);
-}
-.min-label {
-  font-size: 0.7em;
-  color: #888;
-  margin-left: 2px;
 }
 .report-header {
   text-align: center;
@@ -462,14 +761,5 @@ const exportPDF = () => {
 }
 #printable-area .report-header {
   display: block;
-}
-@media print {
-  .edit-message {
-    border: none !important;
-    resize: none;
-  }
-  .edit-duration {
-    border: none !important;
-  }
 }
 </style>
