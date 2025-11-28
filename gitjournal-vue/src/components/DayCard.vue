@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from "vue";
 import CommitRow from "./CommitRow.vue";
-import { formatDuration } from "../utils/gitParser";
+import { formatDuration } from "../utils/gitParser.mjs";
 
 const props = defineProps({
   date: String,

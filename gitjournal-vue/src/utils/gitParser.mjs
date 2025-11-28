@@ -1,4 +1,4 @@
-// src/utils/gitParser.js
+// src/utils/gitParser.mjs
 import { format } from "date-fns";
 
 export const formatDuration = (minutes) => {
@@ -39,21 +39,25 @@ export const extractTags = (originalMsg) => {
   let manualDuration = null;
   let status = null;
 
-  // 1. Statut
-  const statusRegex = /\[(DONE|WIP|FIX|FEATURE)\]/i;
+  // 1. Statut (e.g., [DONE])
+  const statusRegex = /\[(DONE|WIP|FIX|FEAT|BUG)\]/i;
   const statusMatch = cleanMsg.match(statusRegex);
   if (statusMatch) {
     status = statusMatch[1].toUpperCase();
     cleanMsg = cleanMsg.replace(statusMatch[0], "");
   }
 
-  // 2. Durée
+  // 2. Duration (e.g., [15m])
   const timeRegex = /\[(\d+(?:h|m)?(?:\d+m?)?)\]/i;
   const timeMatch = cleanMsg.match(timeRegex);
   if (timeMatch) {
     manualDuration = parseDurationStr(timeMatch[1]);
     cleanMsg = cleanMsg.replace(timeMatch[0], "");
   }
+
+  // 3. Category (e.g., [cicd], [test]) - Removes any remaining bracketed content
+  const catRegex = /\[(.*?)\]/g;
+  cleanMsg = cleanMsg.replace(catRegex, "");
 
   return {
     fullCleanMsg: cleanMsg.trim(),
